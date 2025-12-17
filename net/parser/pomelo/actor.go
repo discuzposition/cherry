@@ -10,6 +10,7 @@ import (
 	cactor "github.com/cherry-game/cherry/net/actor"
 	pomeloMessage "github.com/cherry-game/cherry/net/parser/pomelo/message"
 	ppacket "github.com/cherry-game/cherry/net/parser/pomelo/packet"
+	pproto "github.com/cherry-game/cherry/net/parser/pomelo/proto"
 	cproto "github.com/cherry-game/cherry/net/proto"
 	"github.com/nats-io/nuid"
 	"go.uber.org/zap/zapcore"
@@ -200,4 +201,22 @@ func (p *Actor) broadcast(rsp *cproto.PomeloBroadcast) {
 			return
 		}
 	}
+}
+
+// SetProtoOptions 设置 Proto 配置选项
+// 用于在握手阶段下发 Protobuf Schema 给客户端
+// 必须在 Load() 之前调用
+func (*Actor) SetProtoOptions(opts pproto.Options) {
+	SetProtoOptions(opts)
+}
+
+// SetProtos 直接设置 Proto Schema（用于手动配置）
+// 必须在 Load() 之前调用
+func (*Actor) SetProtos(schema *pproto.ProtoSchema) {
+	SetProtos(schema)
+}
+
+// GetProtoSchema 获取当前的 Proto Schema
+func (*Actor) GetProtoSchema() *pproto.ProtoSchema {
+	return GetProtoSchema()
 }

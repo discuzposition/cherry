@@ -7,6 +7,7 @@ import (
 	clog "github.com/cherry-game/cherry/logger"
 	pmessage "github.com/cherry-game/cherry/net/parser/pomelo/message"
 	ppacket "github.com/cherry-game/cherry/net/parser/pomelo/packet"
+	pproto "github.com/cherry-game/cherry/net/parser/pomelo/proto"
 	jsoniter "github.com/json-iterator/go"
 	"go.uber.org/zap/zapcore"
 )
@@ -20,6 +21,8 @@ type (
 		heartbeatBytes  []byte
 		onPacketFuncMap map[ppacket.Type]PacketFunc
 		onDataRouteFunc DataRouteFunc
+		protoOptions    *pproto.Options      // Proto 配置选项
+		protoSchema     *pproto.ProtoSchema  // 解析后的 Proto Schema
 	}
 
 	PacketFunc    func(agent *Agent, packet *ppacket.Packet)
@@ -30,6 +33,7 @@ const (
 	DataHeartbeat  = "heartbeat"
 	DataDict       = "dict"
 	DataSerializer = "serializer"
+	DataProtos     = "protos" // Protobuf Schema 数据
 )
 
 var (
@@ -49,11 +53,34 @@ func (p *Command) init(app cfacade.IApplication) {
 	p.setData(DataDict, pmessage.GetDictionary())
 	p.setData(DataSerializer, app.Serializer().Name())
 
+	// 解析并设置 Proto Schema
+	p.parseAndSetProtos()
+
 	p.setHandshakeBytes()
 	p.setHeartbeatBytes()
 
 	p.setOnPacketFunc()
+}
 
+// parseAndSetProtos 解析 proto 文件并设置到 sysData
+func (p *Command) parseAndSetProtos() {
+	if p.protoOptions == nil || !p.protoOptions.HasProtoConfig() {
+		return
+	}
+
+	parser := pproto.NewParser(*p.protoOptions)
+	schema, err := parser.Parse()
+	if err != nil {
+		clog.Errorf("[ProtoParser] 解析 proto 文件失败: %v", err)
+		return
+	}
+
+	if schema != nil {
+		p.protoSchema = schema
+		p.setData(DataProtos, schema)
+		clog.Infof("[ProtoParser] Proto Schema 加载成功, version=%d, server routes=%d, client routes=%d",
+			schema.Version, len(schema.Server), len(schema.Client))
+	}
 }
 
 func (p *Command) setData(name string, value interface{}) {
@@ -177,4 +204,23 @@ func dataCommand(agent *Agent, pkg *ppacket.Packet) {
 	}
 
 	cmd.onDataRouteFunc(agent, route, &msg)
+}
+
+// SetProtoOptions 设置 Proto 配置选项
+// 必须在 pomelo Actor 初始化之前调用
+func SetProtoOptions(opts pproto.Options) {
+	cmd.protoOptions = &opts
+}
+
+// GetProtoSchema 获取当前的 Proto Schema
+func GetProtoSchema() *pproto.ProtoSchema {
+	return cmd.protoSchema
+}
+
+// SetProtos 直接设置 Proto Schema（用于手动配置）
+func SetProtos(schema *pproto.ProtoSchema) {
+	if schema != nil {
+		cmd.protoSchema = schema
+		cmd.setData(DataProtos, schema)
+	}
 }

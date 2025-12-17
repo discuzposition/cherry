@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -115,7 +116,7 @@ func (p *Parser) parseFile(filePath string) error {
 			messageName := matches[1]
 			currentMessage = &ProtoMessage{
 				Name:   messageName,
-				Fields: make(map[string]*ProtoField),
+				Fields: make([]*ProtoField, 0),
 			}
 			inMessage = true
 			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
@@ -153,7 +154,7 @@ func (p *Parser) parseFile(filePath string) error {
 					field.TypeName = fieldType
 				}
 
-				currentMessage.Fields[fieldName] = field
+				currentMessage.Fields = append(currentMessage.Fields, field)
 			}
 
 			// message 结束
@@ -168,18 +169,18 @@ func (p *Parser) parseFile(filePath string) error {
 	return scanner.Err()
 }
 
-// buildSchema 构建 Pomelo Schema
+// buildSchema 构建 Pomelo Schema（标准格式）
 func (p *Parser) buildSchema() *ProtoSchema {
 	schema := &ProtoSchema{
 		Version: p.options.Version,
-		Server:  make(map[string]MessageSchema),
-		Client:  make(map[string]MessageSchema),
+		Server:  make(map[string]interface{}),
+		Client:  make(map[string]interface{}),
 	}
 
 	// 构建服务端路由 Schema
 	for route, msgName := range p.options.ServerRoutes {
 		if msg, ok := p.messages[msgName]; ok {
-			schema.Server[route] = p.buildMessageSchema(msg)
+			schema.Server[route] = p.buildRouteSchema(msg)
 		} else {
 			clog.Warnf("[ProtoParser] 服务端路由消息未找到: route=%s, message=%s", route, msgName)
 		}
@@ -188,7 +189,7 @@ func (p *Parser) buildSchema() *ProtoSchema {
 	// 构建客户端路由 Schema
 	for route, msgName := range p.options.ClientRoutes {
 		if msg, ok := p.messages[msgName]; ok {
-			schema.Client[route] = p.buildMessageSchema(msg)
+			schema.Client[route] = p.buildRouteSchema(msg)
 		} else {
 			clog.Warnf("[ProtoParser] 客户端路由消息未找到: route=%s, message=%s", route, msgName)
 		}
@@ -197,45 +198,108 @@ func (p *Parser) buildSchema() *ProtoSchema {
 	return schema
 }
 
-// buildMessageSchema 构建消息 Schema
-func (p *Parser) buildMessageSchema(msg *ProtoMessage) MessageSchema {
-	schema := make(MessageSchema)
+// buildRouteSchema 构建单个路由的 Schema（标准 Pomelo 格式）
+// 格式示例:
+// {
+//   "optional uInt32 code": 1,
+//   "repeated message Hero heroes": 2,
+//   "__messages__": {
+//     "Hero": {
+//       "optional int32 configId": 1,
+//       "optional string name": 2
+//     }
+//   }
+// }
+func (p *Parser) buildRouteSchema(msg *ProtoMessage) map[string]interface{} {
+	result := make(map[string]interface{})
+	nestedMessages := make(map[string]interface{})
 
-	for fieldName, field := range msg.Fields {
-		if field.Repeated {
-			// 数组类型
-			if field.Type == TypeMessage {
-				// 嵌套消息数组
-				if nestedMsg, ok := p.messages[field.TypeName]; ok {
-					schema[fieldName] = []interface{}{p.buildMessageSchema(nestedMsg)}
-				} else {
-					schema[fieldName] = []interface{}{map[string]interface{}{}}
-				}
-			} else {
-				// 基础类型数组
-				schema[fieldName] = []interface{}{string(field.Type)}
-			}
-		} else {
-			// 非数组类型
-			if field.Type == TypeMessage {
-				// 嵌套消息
-				if nestedMsg, ok := p.messages[field.TypeName]; ok {
-					schema[fieldName] = p.buildMessageSchema(nestedMsg)
-				} else {
-					schema[fieldName] = map[string]interface{}{}
-				}
-			} else {
-				// 基础类型
-				schema[fieldName] = string(field.Type)
-			}
+	// 按标签号排序字段
+	sortedFields := make([]*ProtoField, len(msg.Fields))
+	copy(sortedFields, msg.Fields)
+	sort.Slice(sortedFields, func(i, j int) bool {
+		return sortedFields[i].Tag < sortedFields[j].Tag
+	})
+
+	// 处理每个字段
+	for _, field := range sortedFields {
+		fieldKey := p.buildFieldKey(field)
+		result[fieldKey] = field.Tag
+
+		// 如果是嵌套消息类型，递归收集嵌套消息定义
+		if field.Type == TypeMessage {
+			p.collectNestedMessages(field.TypeName, nestedMessages)
 		}
 	}
 
-	return schema
+	// 如果有嵌套消息，添加 __messages__ 字段
+	if len(nestedMessages) > 0 {
+		result[MessagesKey] = nestedMessages
+	}
+
+	return result
+}
+
+// buildFieldKey 构建字段的 key
+// 格式: "修饰符 类型 字段名"
+func (p *Parser) buildFieldKey(field *ProtoField) string {
+	var modifier FieldModifier
+	var typeStr string
+
+	// 确定修饰符
+	if field.Repeated {
+		modifier = ModifierRepeated
+	} else {
+		modifier = ModifierOptional
+	}
+
+	// 确定类型字符串
+	if field.Type == TypeMessage {
+		// 嵌套消息类型使用原始类型名
+		typeStr = "message " + field.TypeName
+	} else {
+		typeStr = string(field.Type)
+	}
+
+	return string(modifier) + " " + typeStr + " " + field.Name
+}
+
+// collectNestedMessages 递归收集嵌套消息定义
+func (p *Parser) collectNestedMessages(msgName string, collected map[string]interface{}) {
+	// 避免重复收集
+	if _, exists := collected[msgName]; exists {
+		return
+	}
+
+	msg, ok := p.messages[msgName]
+	if !ok {
+		return
+	}
+
+	// 构建该消息的 schema
+	msgSchema := make(map[string]interface{})
+
+	// 按标签号排序字段
+	sortedFields := make([]*ProtoField, len(msg.Fields))
+	copy(sortedFields, msg.Fields)
+	sort.Slice(sortedFields, func(i, j int) bool {
+		return sortedFields[i].Tag < sortedFields[j].Tag
+	})
+
+	for _, field := range sortedFields {
+		fieldKey := p.buildFieldKey(field)
+		msgSchema[fieldKey] = field.Tag
+
+		// 递归收集嵌套消息
+		if field.Type == TypeMessage {
+			p.collectNestedMessages(field.TypeName, collected)
+		}
+	}
+
+	collected[msgName] = msgSchema
 }
 
 // GetMessages 获取所有解析的消息
 func (p *Parser) GetMessages() map[string]*ProtoMessage {
 	return p.messages
 }
-

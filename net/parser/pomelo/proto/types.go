@@ -1,14 +1,15 @@
 package pomeloProto
 
-// ProtoSchema Pomelo 风格的 Protobuf Schema 定义
+// ProtoSchema Pomelo 标准 Protobuf Schema 定义
 type ProtoSchema struct {
-	Version int                       `json:"version"`          // 协议版本号
-	Server  map[string]MessageSchema  `json:"server,omitempty"` // 服务端消息协议（用于客户端解码）
-	Client  map[string]MessageSchema  `json:"client,omitempty"` // 客户端消息协议（用于客户端编码）
+	Version int                      `json:"version"`          // 协议版本号
+	Server  map[string]interface{}   `json:"server,omitempty"` // 服务端消息协议（用于客户端解码）
+	Client  map[string]interface{}   `json:"client,omitempty"` // 客户端消息协议（用于客户端编码）
 }
 
 // MessageSchema 消息 Schema 定义
-// key: 字段名, value: 字段类型
+// 原始 Pomelo 格式: key = "修饰符 类型 字段名", value = 标签号
+// 例如: "optional uInt32 code": 1, "repeated message Item items": 2
 type MessageSchema map[string]interface{}
 
 // FieldType Pomelo 风格的字段类型
@@ -30,6 +31,20 @@ const (
 	TypeMessage FieldType = "message" // 嵌套消息类型
 )
 
+// FieldModifier 字段修饰符
+type FieldModifier string
+
+const (
+	ModifierRequired FieldModifier = "required"
+	ModifierOptional FieldModifier = "optional"
+	ModifierRepeated FieldModifier = "repeated"
+)
+
+// 特殊字段名
+const (
+	MessagesKey = "__messages__" // 嵌套消息定义的 key
+)
+
 // RouteMapping 路由到消息的映射配置
 type RouteMapping struct {
 	Route       string // 路由名称，如 "connector.entryHandler.entry"
@@ -40,7 +55,7 @@ type RouteMapping struct {
 // ProtoMessage 解析后的 Proto 消息定义
 type ProtoMessage struct {
 	Name   string                 // 消息名称
-	Fields map[string]*ProtoField // 字段映射
+	Fields []*ProtoField          // 字段列表（保持顺序）
 }
 
 // ProtoField Proto 字段定义
@@ -77,3 +92,9 @@ func GetPomeloType(protoType string) (FieldType, bool) {
 	return t, ok
 }
 
+// BuildFieldKey 构建原始 Pomelo 格式的字段 key
+// 格式: "修饰符 类型 字段名"
+// 例如: "optional uInt32 code", "repeated message Item items"
+func BuildFieldKey(modifier FieldModifier, fieldType string, fieldName string) string {
+	return string(modifier) + " " + fieldType + " " + fieldName
+}

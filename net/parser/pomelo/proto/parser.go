@@ -99,6 +99,7 @@ func (p *Parser) parseFile(filePath string) error {
 	// 正则表达式
 	messageRegex := regexp.MustCompile(`^\s*message\s+(\w+)\s*\{?\s*$`)
 	fieldRegex := regexp.MustCompile(`^\s*(repeated\s+)?(\w+)\s+(\w+)\s*=\s*(\d+)\s*;`)
+	mapRegex := regexp.MustCompile(`^\s*map\s*<\s*([\w.]+)\s*,\s*([\w.]+)\s*>\s+(\w+)\s*=\s*(\d+)\s*;`)
 	openBraceRegex := regexp.MustCompile(`\{`)
 	closeBraceRegex := regexp.MustCompile(`\}`)
 
@@ -132,8 +133,71 @@ func (p *Parser) parseFile(filePath string) error {
 			braceCount += len(openBraceRegex.FindAllString(line, -1))
 			braceCount -= len(closeBraceRegex.FindAllString(line, -1))
 
-			// 解析字段
-			if matches := fieldRegex.FindStringSubmatch(line); matches != nil {
+			// 解析 map 字段: map<keyType, valueType> fieldName = tag;
+			if matches := mapRegex.FindStringSubmatch(line); matches != nil {
+				keyTypeRaw := matches[1]
+				valueTypeRaw := matches[2]
+				fieldName := matches[3]
+				tag, _ := strconv.Atoi(matches[4])
+
+				keyType := normalizeTypeName(keyTypeRaw)
+				valueType := normalizeTypeName(valueTypeRaw)
+
+				// 生成 map entry message
+				// 注意：该名字不会出现在 wire 上，只要 schema 内一致即可
+				entryMsgName := currentMessage.Name + "_" + fieldName + "Entry"
+
+				// 构建 entry 消息
+				entryMsg := &ProtoMessage{
+					Name:   entryMsgName,
+					Fields: make([]*ProtoField, 0, 2),
+				}
+
+				// key 字段（tag=1）
+				keyField := &ProtoField{
+					Name:     "key",
+					Tag:      1,
+					Repeated: false,
+				}
+				if pomeloType, ok := GetPomeloType(keyType); ok {
+					keyField.Type = pomeloType
+				} else {
+					// map 的 key 必须是标量类型；如果解析失败，退化为 string
+					clog.Warnf("[ProtoParser] map key 类型不支持，已退化为 string: %s (field=%s.%s)", keyTypeRaw, currentMessage.Name, fieldName)
+					keyField.Type = TypeString
+				}
+				entryMsg.Fields = append(entryMsg.Fields, keyField)
+
+				// value 字段（tag=2）
+				valueField := &ProtoField{
+					Name:     "value",
+					Tag:      2,
+					Repeated: false,
+				}
+				if pomeloType, ok := GetPomeloType(valueType); ok {
+					valueField.Type = pomeloType
+				} else {
+					valueField.Type = TypeMessage
+					valueField.TypeName = valueType
+				}
+				entryMsg.Fields = append(entryMsg.Fields, valueField)
+
+				// 注册 entry message
+				if _, exists := p.messages[entryMsgName]; !exists {
+					p.messages[entryMsgName] = entryMsg
+				}
+
+				// 当前 message 添加 map 字段：在 wire 上表现为 repeated message Entry
+				mapField := &ProtoField{
+					Name:     fieldName,
+					Tag:      tag,
+					Repeated: true,
+					Type:     TypeMessage,
+					TypeName: entryMsgName,
+				}
+				currentMessage.Fields = append(currentMessage.Fields, mapField)
+			} else if matches := fieldRegex.FindStringSubmatch(line); matches != nil {
+				// 解析普通字段
 				repeated := strings.TrimSpace(matches[1]) == "repeated"
 				fieldType := matches[2]
 				fieldName := matches[3]
@@ -151,12 +215,13 @@ func (p *Parser) parseFile(filePath string) error {
 				} else {
 					// 自定义消息类型
 					field.Type = TypeMessage
-					field.TypeName = fieldType
+					field.TypeName = normalizeTypeName(fieldType)
 				}
 
 				currentMessage.Fields = append(currentMessage.Fields, field)
 			}
 
+			// 解析字段
 			// message 结束
 			if braceCount <= 0 {
 				p.messages[currentMessage.Name] = currentMessage
@@ -167,6 +232,15 @@ func (p *Parser) parseFile(filePath string) error {
 	}
 
 	return scanner.Err()
+}
+
+// normalizeTypeName 将带包名的类型引用简化为最后一段（例如 foo.bar.Baz -> Baz）
+func normalizeTypeName(t string) string {
+	if strings.Contains(t, ".") {
+		parts := strings.Split(t, ".")
+		return parts[len(parts)-1]
+	}
+	return t
 }
 
 // buildSchema 构建 Pomelo Schema（标准格式）

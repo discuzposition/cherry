@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -269,21 +270,31 @@ func (p *Parser) buildSchema() *ProtoSchema {
 		}
 	}
 
+	if p.options.GlobalMessages {
+		globalMessages := make(map[string]interface{})
+		p.collectGlobalMessages(schema.Server, globalMessages)
+		p.collectGlobalMessages(schema.Client, globalMessages)
+		if len(globalMessages) > 0 {
+			schema.Messages = globalMessages
+		}
+	}
+
 	return schema
 }
 
 // buildRouteSchema 构建单个路由的 Schema（标准 Pomelo 格式）
 // 格式示例:
-// {
-//   "optional uInt32 code": 1,
-//   "repeated message Hero heroes": 2,
-//   "__messages__": {
-//     "Hero": {
-//       "optional int32 configId": 1,
-//       "optional string name": 2
-//     }
-//   }
-// }
+//
+//	{
+//	  "optional uInt32 code": 1,
+//	  "repeated message Hero heroes": 2,
+//	  "__messages__": {
+//	    "Hero": {
+//	      "optional int32 configId": 1,
+//	      "optional string name": 2
+//	    }
+//	  }
+//	}
 func (p *Parser) buildRouteSchema(msg *ProtoMessage) map[string]interface{} {
 	result := make(map[string]interface{})
 	nestedMessages := make(map[string]interface{})
@@ -371,6 +382,34 @@ func (p *Parser) collectNestedMessages(msgName string, collected map[string]inte
 	}
 
 	collected[msgName] = msgSchema
+}
+
+func (p *Parser) collectGlobalMessages(routes map[string]interface{}, global map[string]interface{}) {
+	for _, routeSchema := range routes {
+		schemaMap, ok := routeSchema.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		msgsRaw, found := schemaMap[MessagesKey]
+		if !found {
+			continue
+		}
+		msgsMap, ok := msgsRaw.(map[string]interface{})
+		if !ok {
+			delete(schemaMap, MessagesKey)
+			continue
+		}
+		for name, msgSchema := range msgsMap {
+			if existing, exists := global[name]; exists {
+				if !reflect.DeepEqual(existing, msgSchema) {
+					clog.Warnf("[ProtoParser] 全局消息冲突: %s", name)
+				}
+				continue
+			}
+			global[name] = msgSchema
+		}
+		delete(schemaMap, MessagesKey)
+	}
 }
 
 // GetMessages 获取所有解析的消息

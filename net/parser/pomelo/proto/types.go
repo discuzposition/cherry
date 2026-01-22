@@ -5,6 +5,7 @@ type ProtoSchema struct {
 	Version int                      `json:"version"`          // 协议版本号
 	Server  map[string]interface{}   `json:"server,omitempty"` // 服务端消息协议（用于客户端解码）
 	Client  map[string]interface{}   `json:"client,omitempty"` // 客户端消息协议（用于客户端编码）
+	Messages map[string]interface{}  `json:"__messages__,omitempty"`
 }
 
 // MessageSchema 消息 Schema 定义

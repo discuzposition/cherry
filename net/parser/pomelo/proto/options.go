@@ -11,6 +11,8 @@ type Options struct {
 	// Version 协议版本号
 	Version int
 
+	GlobalMessages bool
+
 	// ServerRoutes 服务端路由映射
 	// key: 路由名称 (如 "connector.entryHandler.entry")
 	// value: 消息名称 (如 "EntryResponse")
@@ -28,6 +30,7 @@ func DefaultOptions() Options {
 		ProtoFiles:   make([]string, 0),
 		ProtoDir:     "",
 		Version:      1,
+		GlobalMessages: false,
 		ServerRoutes: make(map[string]string),
 		ClientRoutes: make(map[string]string),
 	}

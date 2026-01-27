@@ -14,15 +14,30 @@ import (
 
 type (
 	Command struct {
-		writeBacklog    int
-		sysData         map[string]interface{}
-		heartbeatTime   time.Duration
-		handshakeBytes  []byte
-		heartbeatBytes  []byte
-		onPacketFuncMap map[ppacket.Type]PacketFunc
-		onDataRouteFunc DataRouteFunc
-		protoOptions    *pproto.Options      // Proto 配置选项
-		protoSchema     *pproto.ProtoSchema  // 解析后的 Proto Schema
+		writeBacklog           int
+		sysData                map[string]interface{}
+		heartbeatTime          time.Duration
+		handshakeBytes         []byte                  // 完整握手响应（包含协议数据）
+		handshakeBytesNoProtos []byte                  // 不含协议数据的握手响应（版本匹配时使用）
+		heartbeatBytes         []byte
+		onPacketFuncMap        map[ppacket.Type]PacketFunc
+		onDataRouteFunc        DataRouteFunc
+		protoOptions           *pproto.Options         // Proto 配置选项
+		protoSchema            *pproto.ProtoSchema     // 解析后的 Proto Schema
+	}
+
+	// ClientHandshake 客户端握手数据结构
+	ClientHandshake struct {
+		Sys  ClientHandshakeSys     `json:"sys"`
+		User map[string]interface{} `json:"user"`
+	}
+
+	// ClientHandshakeSys 客户端握手系统信息
+	ClientHandshakeSys struct {
+		Type         string                 `json:"type"`
+		Version      string                 `json:"version"`
+		ProtoVersion int                    `json:"protoVersion"`
+		RSA          map[string]interface{} `json:"rsa"`
 	}
 
 	PacketFunc    func(agent *Agent, packet *ppacket.Packet)
@@ -90,6 +105,7 @@ func (p *Command) setData(name string, value interface{}) {
 }
 
 func (p *Command) setHandshakeBytes() {
+	// 生成完整握手响应（包含协议数据）
 	handshakeData := map[string]interface{}{
 		"code": 200,
 		"sys":  p.sysData,
@@ -107,7 +123,36 @@ func (p *Command) setHandshakeBytes() {
 		return
 	}
 
-	clog.Infof("[initCommand] handshake data = %v", handshakeData)
+	clog.Infof("[initCommand] handshake data (with protos) = %v", handshakeData)
+
+	// 生成不含协议数据的握手响应（版本匹配时使用，节省带宽）
+	sysDataNoProtos := make(map[string]interface{})
+	for k, v := range p.sysData {
+		if k != DataProtos {
+			sysDataNoProtos[k] = v
+		}
+	}
+
+	handshakeDataNoProtos := map[string]interface{}{
+		"code": 200,
+		"sys":  sysDataNoProtos,
+	}
+
+	handshakeBytesNoProtos, err := jsoniter.Marshal(handshakeDataNoProtos)
+	if err != nil {
+		clog.Error(err)
+		return
+	}
+
+	p.handshakeBytesNoProtos, err = ppacket.Encode(ppacket.Handshake, handshakeBytesNoProtos)
+	if err != nil {
+		clog.Error(err)
+		return
+	}
+
+	clog.Infof("[initCommand] handshake data (no protos) = %v", handshakeDataNoProtos)
+	clog.Infof("[initCommand] handshake bytes size: with protos=%d, without protos=%d",
+		len(p.handshakeBytes), len(p.handshakeBytesNoProtos))
 }
 
 func (p *Command) setHeartbeatBytes() {
@@ -136,9 +181,50 @@ func (p *Command) setOnPacketFunc() {
 	}
 }
 
-func handshakeCommand(agent *Agent, _ *ppacket.Packet) {
+func handshakeCommand(agent *Agent, pkg *ppacket.Packet) {
 	agent.SetState(AgentWaitAck)
-	agent.SendRaw(cmd.handshakeBytes)
+
+	// 默认发送完整握手响应
+	responseBytes := cmd.handshakeBytes
+
+	// 尝试解析客户端握手数据，进行版本号校验
+	if pkg != nil && len(pkg.Data()) > 0 {
+		var clientHandshake ClientHandshake
+		if err := jsoniter.Unmarshal(pkg.Data(), &clientHandshake); err == nil {
+			clientProtoVersion := clientHandshake.Sys.ProtoVersion
+
+			// 获取服务端协议版本号
+			serverProtoVersion := 0
+			if cmd.protoSchema != nil {
+				serverProtoVersion = cmd.protoSchema.Version
+			}
+
+			// 版本号匹配且不为0时，不下发协议数据以节省带宽
+			if clientProtoVersion > 0 && clientProtoVersion == serverProtoVersion {
+				responseBytes = cmd.handshakeBytesNoProtos
+				if clog.PrintLevel(zapcore.DebugLevel) {
+					clog.Debugf("[sid = %s,uid = %d] Proto version matched (v%d), skip protos download. [address = %s]",
+						agent.SID(),
+						agent.UID(),
+						clientProtoVersion,
+						agent.RemoteAddr(),
+					)
+				}
+			} else {
+				if clog.PrintLevel(zapcore.DebugLevel) {
+					clog.Debugf("[sid = %s,uid = %d] Proto version mismatch (client=%d, server=%d), sending full protos. [address = %s]",
+						agent.SID(),
+						agent.UID(),
+						clientProtoVersion,
+						serverProtoVersion,
+						agent.RemoteAddr(),
+					)
+				}
+			}
+		}
+	}
+
+	agent.SendRaw(responseBytes)
 
 	if clog.PrintLevel(zapcore.DebugLevel) {
 		clog.Debugf("[sid = %s,uid = %d] Request handshake. [address = %s]",

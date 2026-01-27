@@ -17,6 +17,7 @@ type (
 	System struct {
 		app              cfacade.IApplication
 		actorMap         *sync.Map          // key:actorID, value:*actor
+		actorEventMap    *sync.Map          // map[string]map[string]int64 => key:eventName, value:map[actorPath]uniqueID
 		localInvokeFunc  cfacade.InvokeFunc // default local func
 		remoteInvokeFunc cfacade.InvokeFunc // default remote func
 		wg               *sync.WaitGroup    // wait group
@@ -29,6 +30,7 @@ type (
 func NewSystem() *System {
 	system := &System{
 		actorMap:         &sync.Map{},
+		actorEventMap:    &sync.Map{},
 		localInvokeFunc:  InvokeLocalFunc,
 		remoteInvokeFunc: InvokeRemoteFunc,
 		wg:               &sync.WaitGroup{},
@@ -65,9 +67,9 @@ func (p *System) Stop() {
 		return true
 	})
 
-	clog.Info("actor system stopping!")
+	clog.Info("[OnStop] actor system stopping!")
 	p.wg.Wait()
-	clog.Info("actor system stopped!")
+	clog.Info("[OnStop]actor system stopped!")
 }
 
 // GetIActor 根据ActorID获取IActor
@@ -93,6 +95,20 @@ func (p *System) GetChildActor(actorID, childID string) (*Actor, bool) {
 	}
 
 	return parentActor.child.GetActor(childID)
+}
+
+func (p *System) GetActorWithPath(path string) (*Actor, bool) {
+	actorPath, err := cfacade.ToActorPath(path)
+	if err != nil {
+		clog.Warnf("[GetActorWithPath] Actor path is error. path = %s, err = %v", path, err)
+		return nil, false
+	}
+
+	if actorPath.IsChild() {
+		return p.GetChildActor(actorPath.ActorID, actorPath.ChildID)
+	}
+
+	return p.GetActor(actorPath.ActorID)
 }
 
 func (p *System) removeActor(actorID string) {
@@ -285,7 +301,11 @@ func (p *System) CallWait(source, target, funcName string, arg, reply any) int32
 			childActor.PostRemote(&message)
 		} else {
 			if !p.PostRemote(&message) {
-				clog.Warnf("[CallWait] Post remote fail. [source = %s, target = %s, funcName = %s]", source, target, funcName)
+				clog.Warnf("[CallWait] Post remote fail. [source = %s, target = %s, funcName = %s]",
+					source,
+					target,
+					funcName,
+				)
 				return ccode.ActorCallFail
 			}
 		}
@@ -294,13 +314,21 @@ func (p *System) CallWait(source, target, funcName string, arg, reply any) int32
 		case result = <-message.ChanResult:
 			{
 				if result == nil {
-					clog.Warnf("[CallWait] Response is nil. [targetPath = %s]", target)
+					clog.Warnf("[CallWait] Response is nil. [source = %s, target = %s, funcName = %s]",
+						source,
+						target,
+						funcName,
+					)
 					return ccode.ActorCallFail
 				}
 
 				rsp := result.(*cproto.Response)
 				if rsp == nil {
-					clog.Warnf("[CallWait] Response is nil. [targetPath = %s]", target)
+					clog.Warnf("[CallWait] Response is nil. [source = %s, target = %s, funcName = %s]",
+						source,
+						target,
+						funcName,
+					)
 					return ccode.ActorCallFail
 				}
 
@@ -310,12 +338,22 @@ func (p *System) CallWait(source, target, funcName string, arg, reply any) int32
 
 				if reply != nil {
 					if rsp.Data == nil {
-						clog.Warnf("[CallWait] rsp.Data is nil. [targetPath = %s, error = %s]", target, err)
+						clog.Warnf("[CallWait] rsp.Data is nil.[source = %s, target = %s, funcName = %s, error = %s]",
+							source,
+							target,
+							funcName,
+							err,
+						)
 					}
 
 					err = p.app.Serializer().Unmarshal(rsp.Data, reply)
 					if err != nil {
-						clog.Warnf("[CallWait] Unmarshal reply error. [targetPath = %s, error = %s]", target, err)
+						clog.Warnf("[CallWait] Unmarshal reply error.[source = %s, target = %s, funcName = %s, error = %s]",
+							source,
+							target,
+							funcName,
+							err,
+						)
 						return ccode.ActorUnmarshalError
 					}
 				}
@@ -363,7 +401,7 @@ func (p *System) CallType(nodeType, actorID, funcName string, arg any) int32 {
 
 	err := p.app.Cluster().PublishRemoteType(nodeType, clusterPacket)
 	if err != nil {
-		clog.Warnf("[CallType] Publish remote fail. [nodeType = %s, actorID = %s, funcName = %s, err = %v]",
+		clog.Warnf("[CallType] Publish remote fail. [nodeType = %s, actorID = %s, funcName = %s, error = %v]",
 			nodeType,
 			actorID,
 			funcName,
@@ -419,20 +457,52 @@ func (p *System) PostEvent(data cfacade.IEventData) {
 		return
 	}
 
-	// range root actor
-	p.actorMap.Range(func(key, value any) bool {
-		if thisActor, found := value.(*Actor); found {
-			if thisActor.state == WorkerState {
-				thisActor.event.Push(data)
+	if len(data.Name()) < 1 {
+		clog.Warnf("[PostEvent] Event name is empty. value = %v", data)
+		return
+	}
+
+	valueMap, found := p.actorEventMap.Load(data.Name())
+	if !found {
+		return
+	}
+
+	// map[string]int64
+	actorIDSMap, ok := valueMap.(*sync.Map)
+	if !ok {
+		return
+	}
+
+	actorIDSMap.Range(func(key, value any) bool {
+		path := key.(string)
+		targetActor, found := p.GetActorWithPath(path)
+		if !found {
+			return true
+		}
+
+		// no set unique
+		if value == nil {
+			if targetActor.state == WorkerState {
+				targetActor.event.Push(data)
 			}
 
-			// range child actor
-			thisActor.Child().Each(func(iActor cfacade.IActor) {
-				if childActor, ok := iActor.(*Actor); ok {
-					childActor.event.Push(data)
-				}
-			})
+			return true
 		}
+
+		uniqueID, ok := value.(int64)
+		if !ok {
+			clog.Warnf("[PostEvent] UniqueID set error in actorEventMap. value = %v", value)
+			return true
+		}
+
+		if uniqueID == data.UniqueID() {
+			if targetActor.state == WorkerState {
+				targetActor.event.Push(data)
+			}
+
+			return true
+		}
+
 		return true
 	})
 }
@@ -462,5 +532,30 @@ func (p *System) SetArrivalTimeout(t int64) {
 func (p *System) SetExecutionTimeout(t int64) {
 	if t > 1 {
 		p.executionTimeout = t
+	}
+}
+
+func (p *System) addActorEvent(actorPath string, eventName string, uniqueID ...int64) {
+	// map[string]map[string]int64 => key:eventName, value:map[actorPath]uniqueID
+	value, _ := p.actorEventMap.LoadOrStore(eventName, &sync.Map{})
+	eventMap := value.(*sync.Map)
+
+	if len(uniqueID) > 0 {
+		eventMap.Store(actorPath, uniqueID[0])
+	} else {
+		eventMap.Store(actorPath, nil) // no set unique
+	}
+}
+
+func (p *System) removeActorEvent(actorPath string, eventNames ...string) {
+	for _, eventName := range eventNames {
+		value, found := p.actorEventMap.Load(eventName)
+		if !found {
+			continue
+		}
+
+		if actorIDMap, found := value.(*sync.Map); found {
+			actorIDMap.Delete(actorPath)
+		}
 	}
 }

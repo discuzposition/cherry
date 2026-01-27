@@ -3,6 +3,7 @@ package pomeloProto
 import (
 	"bufio"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	clog "github.com/cherry-game/cherry/logger"
+	jsoniter "github.com/json-iterator/go"
 )
 
 // Parser Proto 文件解析器
@@ -247,7 +249,7 @@ func normalizeTypeName(t string) string {
 // buildSchema 构建 Pomelo Schema（标准格式）
 func (p *Parser) buildSchema() *ProtoSchema {
 	schema := &ProtoSchema{
-		Version: p.options.Version,
+		Version: 0, // 先设为0，后面根据内容计算
 		Server:  make(map[string]interface{}),
 		Client:  make(map[string]interface{}),
 	}
@@ -279,7 +281,45 @@ func (p *Parser) buildSchema() *ProtoSchema {
 		}
 	}
 
+	// 计算基于内容的版本号
+	// 如果配置了手动版本号且大于0，则使用手动版本号
+	// 否则基于 schema 内容计算 hash 作为版本号
+	if p.options.Version > 0 {
+		schema.Version = p.options.Version
+	} else {
+		schema.Version = p.calculateSchemaVersion(schema)
+	}
+
 	return schema
+}
+
+// calculateSchemaVersion 基于 schema 内容计算版本号
+// 使用 CRC32 hash，确保相同内容生成相同版本号
+func (p *Parser) calculateSchemaVersion(schema *ProtoSchema) int {
+	// 创建一个临时结构用于计算 hash（不包含 version 字段）
+	hashData := struct {
+		Server   map[string]interface{} `json:"server"`
+		Client   map[string]interface{} `json:"client"`
+		Messages map[string]interface{} `json:"__messages__,omitempty"`
+	}{
+		Server:   schema.Server,
+		Client:   schema.Client,
+		Messages: schema.Messages,
+	}
+
+	// 序列化为 JSON（使用排序的 key 确保一致性）
+	jsonBytes, err := jsoniter.ConfigCompatibleWithStandardLibrary.Marshal(hashData)
+	if err != nil {
+		clog.Warnf("[ProtoParser] 计算版本号失败，使用默认版本号 1: %v", err)
+		return 1
+	}
+
+	// 使用 CRC32 计算 hash，转为正整数
+	hash := crc32.ChecksumIEEE(jsonBytes)
+	version := int(hash & 0x7FFFFFFF) // 确保为正整数
+
+	clog.Infof("[ProtoParser] 基于 schema 内容计算版本号: %d (hash=0x%08X)", version, hash)
+	return version
 }
 
 // buildRouteSchema 构建单个路由的 Schema（标准 Pomelo 格式）

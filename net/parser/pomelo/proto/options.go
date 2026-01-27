@@ -9,6 +9,8 @@ type Options struct {
 	ProtoDir string
 
 	// Version 协议版本号
+	// 设置为 0 时，会基于 schema 内容自动计算 hash 作为版本号（推荐）
+	// 设置为 > 0 时，使用手动指定的版本号
 	Version int
 
 	GlobalMessages bool
@@ -27,12 +29,12 @@ type Options struct {
 // DefaultOptions 默认配置
 func DefaultOptions() Options {
 	return Options{
-		ProtoFiles:   make([]string, 0),
-		ProtoDir:     "",
-		Version:      1,
+		ProtoFiles:     make([]string, 0),
+		ProtoDir:       "",
+		Version:        0, // 默认为 0，自动基于 schema 内容计算 hash 版本号
 		GlobalMessages: false,
-		ServerRoutes: make(map[string]string),
-		ClientRoutes: make(map[string]string),
+		ServerRoutes:   make(map[string]string),
+		ClientRoutes:   make(map[string]string),
 	}
 }
 
